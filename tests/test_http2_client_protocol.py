@@ -11,6 +11,8 @@ from unittest import mock
 from urllib.parse import urlencode
 
 import pytest
+from h2.errors import ErrorCodes
+from h2.exceptions import ProtocolError
 from pytest_twisted import async_yield_fixture
 from twisted.internet.defer import Deferred, DeferredList, inlineCallbacks
 from twisted.internet.endpoints import SSL4ClientEndpoint, SSL4ServerEndpoint
@@ -21,6 +23,7 @@ from twisted.web.http import Request as TxRequest
 from twisted.web.server import NOT_DONE_YET, Site
 from twisted.web.static import File
 
+from scrapy.core._http2.stream import RefusedStream
 from scrapy.exceptions import (
     DownloadCancelledError,
     DownloadTimeoutError,
@@ -640,6 +643,17 @@ class TestHttps2ClientProtocol:
                 isinstance(e, InactiveStreamClosed) for e in failure.value.reasons
             )
 
+            # the failure maps to the dedicated retryable exception that the
+            # retry middleware accepts by default
+            from scrapy.exceptions import InactiveStreamClosedError  # noqa: PLC0415
+            from scrapy.utils._download_handlers import wrap_twisted_exceptions  # noqa: PLC0415
+
+            with (
+                pytest.raises(InactiveStreamClosedError),
+                wrap_twisted_exceptions(),
+            ):
+                raise failure.value
+
         # Send 100 request (we do not check the result)
         for _ in range(100):
             d = make_request_dfd(
@@ -663,6 +677,63 @@ class TestHttps2ClientProtocol:
         client.transport.loseConnection()
 
         yield DeferredList(d_list, consumeErrors=True, fireOnOneErrback=True)
+
+    @staticmethod
+    def _rst_stream_frame(stream_id: int, error_code: int) -> bytes:
+        # RST_STREAM is frame type 0x3 with a 4-byte error code payload
+        payload = error_code.to_bytes(4, "big")
+        return (
+            len(payload).to_bytes(3, "big")
+            + bytes((0x3, 0))
+            + (stream_id & 0x7FFFFFFF).to_bytes(4, "big")
+            + payload
+        )
+
+    async def _remote_reset(
+        self, client: H2ClientProtocol, server_port: int, error_code: int
+    ) -> ResponseFailed:
+        request = Request(self.get_url(server_port, "/timeout"))
+        d = make_request_dfd(client, request)
+
+        # wait until the request of the stream was actually sent
+        stream = None
+        for _ in range(100):
+            if client.streams:
+                stream = next(iter(client.streams.values()))
+                if stream.metadata["request_sent"]:
+                    break
+            await sleep(0.02)
+        assert stream is not None
+        assert stream.metadata["request_sent"]
+
+        # simulate the remote peer resetting the stream with the given code
+        client.dataReceived(self._rst_stream_frame(stream.stream_id, error_code))
+
+        result = await maybe_deferred_to_future(
+            d.addCallbacks(lambda _: None, lambda f: f.value)
+        )
+        assert isinstance(result, ResponseFailed)
+        return result
+
+    @deferred_f_from_coro_f
+    async def test_remote_refused_stream(
+        self, server_port: int, client: H2ClientProtocol
+    ) -> None:
+        failure = await self._remote_reset(
+            client, server_port, int(ErrorCodes.REFUSED_STREAM)
+        )
+        assert any(isinstance(e, RefusedStream) for e in failure.reasons)
+
+    @deferred_f_from_coro_f
+    async def test_remote_reset_other_error_code(
+        self, server_port: int, client: H2ClientProtocol
+    ) -> None:
+        # a reset with any other code keeps the generic ProtocolError behavior
+        failure = await self._remote_reset(
+            client, server_port, int(ErrorCodes.INTERNAL_ERROR)
+        )
+        assert not any(isinstance(e, RefusedStream) for e in failure.reasons)
+        assert any(type(e) is ProtocolError for e in failure.reasons)
 
     @deferred_f_from_coro_f
     async def test_invalid_request_type(self, client: H2ClientProtocol):

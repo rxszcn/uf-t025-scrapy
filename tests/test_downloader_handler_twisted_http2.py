@@ -17,7 +17,7 @@ from scrapy.exceptions import (
     NotConfigured,
     UnsupportedURLSchemeError,
 )
-from scrapy.http import Request
+from scrapy.http import Request, Response
 from scrapy.utils.defer import deferred_from_coro, maybe_deferred_to_future
 from scrapy.utils.misc import build_from_crawler
 from scrapy.utils.test import get_crawler
@@ -39,7 +39,6 @@ from tests.utils.decorators import coroutine_test
 if TYPE_CHECKING:
     from scrapy.core.downloader.handlers import DownloadHandlerProtocol
     from tests.mockserver.http import MockServer
-
 
 pytestmark = [
     pytest.mark.requires_reactor,  # H2DownloadHandler requires a reactor
@@ -232,3 +231,93 @@ class TestRealWebsite(H2DownloadHandlerMixin, TestRealWebsiteBase):
     @property
     def platform_cert_store_works(self) -> bool:
         return sys.platform != "win32"
+
+
+class _SingleH2PathSpider(Spider):
+    """Crawls a single HTTPS path using the HTTP/2 handler and records the
+    download exceptions that reach the request errback."""
+
+    name = "single_h2_path"
+    mockserver: MockServer
+
+    def __init__(self, path: str = "/", *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self._path = path
+        self.errback_exceptions: list[str] = []
+
+    async def start(self) -> Any:
+        yield Request(
+            self.mockserver.url(self._path, is_secure=True),
+            errback=self.on_error,
+        )
+
+    def on_error(self, failure: Any) -> None:
+        self.errback_exceptions.append(type(failure.value).__name__)
+
+    def parse(self, response: Response) -> Any:
+        return None
+
+
+def _h2_crawl_settings() -> dict[str, Any]:
+    return {
+        "DOWNLOAD_HANDLERS": {
+            "http": None,
+            "https": "scrapy.core.downloader.handlers.http2.H2DownloadHandler",
+        },
+        "RETRY_TIMES": 2,
+    }
+
+
+@coroutine_test
+async def test_refused_stream_is_retried(mockserver: MockServer) -> None:
+    """A REFUSED_STREAM reset asks the client to retry (RFC 9113), so the
+    request is retried with a dedicated reason until retries are exhausted."""
+    crawler = get_crawler(_SingleH2PathSpider, _h2_crawl_settings())
+    await crawler.crawl_async(mockserver=mockserver, path="/h2-refused-stream")
+    assert crawler.stats is not None
+    assert crawler.stats.get_value("retry/count") == 2
+    assert (
+        crawler.stats.get_value(
+            "retry/reason_count/scrapy.exceptions.RefusedStreamError"
+        )
+        == 2
+    )
+    spider = crawler.spider
+    assert isinstance(spider, _SingleH2PathSpider)
+    assert spider.errback_exceptions == ["RefusedStreamError"]
+
+
+@coroutine_test
+async def test_generic_reset_reason_unchanged(mockserver: MockServer) -> None:
+    """A reset that is not REFUSED_STREAM still retries as a generic download
+    failure, preserving the previous behavior."""
+    crawler = get_crawler(_SingleH2PathSpider, _h2_crawl_settings())
+    await crawler.crawl_async(mockserver=mockserver, path="/h2-reset-stream")
+    assert crawler.stats is not None
+    assert crawler.stats.get_value("retry/count") == 2
+    assert (
+        crawler.stats.get_value(
+            "retry/reason_count/scrapy.exceptions.DownloadFailedError"
+        )
+        == 2
+    )
+    assert (
+        crawler.stats.get_value(
+            "retry/reason_count/scrapy.exceptions.RefusedStreamError"
+        )
+        is None
+    )
+
+
+@coroutine_test
+async def test_refused_stream_does_not_retry_when_disabled(
+    mockserver: MockServer,
+) -> None:
+    settings = {**_h2_crawl_settings(), "RETRY_ENABLED": False}
+    crawler = get_crawler(_SingleH2PathSpider, settings)
+    await crawler.crawl_async(mockserver=mockserver, path="/h2-refused-stream")
+    assert crawler.stats is not None
+    assert crawler.stats.get_value("retry/count") is None
+    spider = crawler.spider
+    assert isinstance(spider, _SingleH2PathSpider)
+    assert spider.errback_exceptions == ["RefusedStreamError"]

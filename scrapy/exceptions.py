@@ -139,6 +139,19 @@ class DownloadFailedError(Exception):
     """Indicates that a request download has failed."""
 
 
+class InactiveStreamClosedError(Exception):
+    """Indicates that an HTTP/2 stream was closed by the connection before its
+    request was sent, e.g. when the server overloaded and idle-disconnected the
+    connection while the stream waited for a free slot. The request is safe to
+    retry because it never reached the server."""
+
+
+class RefusedStreamError(Exception):
+    """Indicates that an HTTP/2 stream was reset by the server with the
+    REFUSED_STREAM error code (RFC 9113), which asks the client to retry the
+    request, as the stream was not processed."""
+
+
 class ResponseDataLossError(Exception):
     """Indicates that Scrapy couldn't get a complete response."""
 

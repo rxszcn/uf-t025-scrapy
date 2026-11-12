@@ -7,8 +7,8 @@ from http.cookiejar import CookieJar
 from typing import TYPE_CHECKING, Any
 
 from twisted.internet.defer import CancelledError
+from twisted.internet.error import ConnectionClosed, DNSLookupError
 from twisted.internet.error import ConnectionRefusedError as TxConnectionRefusedError
-from twisted.internet.error import DNSLookupError
 from twisted.internet.error import TimeoutError as TxTimeoutError
 from twisted.python.failure import Failure
 from twisted.web.client import ResponseFailed
@@ -21,6 +21,8 @@ from scrapy.exceptions import (
     DownloadConnectionRefusedError,
     DownloadFailedError,
     DownloadTimeoutError,
+    InactiveStreamClosedError,
+    RefusedStreamError,
     StopDownload,
     UnsupportedURLSchemeError,
 )
@@ -50,9 +52,33 @@ class NullCookieJar(CookieJar):  # pragma: no cover
         pass
 
 
+def _is_benign_inactive_stream_close(
+    failure: ResponseFailed, inactive_stream_closed: type[BaseException]
+) -> bool:
+    """Whether *failure* is a stream that never sent its request because its
+    connection closed on its own.
+
+    Such a stream is safe to retry only when every reason is a benign transport
+    close. A fatal reason carried alongside it, e.g. an SSL handshake failure,
+    makes the failure non-retryable.
+    """
+    if not any(
+        isinstance(reason, inactive_stream_closed) for reason in failure.reasons
+    ):
+        return False
+    return all(
+        isinstance(reason, (inactive_stream_closed, ConnectionClosed))
+        for reason in failure.reasons
+    )
+
+
 @contextmanager
 def wrap_twisted_exceptions() -> Iterator[None]:
     """Context manager that wraps Twisted exceptions into Scrapy exceptions."""
+    # Imported here to avoid a circular import: the HTTP/2 stream module imports
+    # this module, so it cannot be imported back at module load time.
+    from scrapy.core._http2.stream import InactiveStreamClosed, RefusedStream  # noqa: PLC0415
+
     try:
         yield
     except SchemeNotSupported as e:
@@ -64,6 +90,10 @@ def wrap_twisted_exceptions() -> Iterator[None]:
     except DNSLookupError as e:
         raise CannotResolveHostError(str(e)) from e
     except ResponseFailed as e:
+        if any(isinstance(reason, RefusedStream) for reason in e.reasons):
+            raise RefusedStreamError(str(e)) from e
+        if _is_benign_inactive_stream_close(e, InactiveStreamClosed):
+            raise InactiveStreamClosedError(str(e)) from e
         raise DownloadFailedError(str(e)) from e
     except TxTimeoutError as e:
         raise DownloadTimeoutError(str(e)) from e

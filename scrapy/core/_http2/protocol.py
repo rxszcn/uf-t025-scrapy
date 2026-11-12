@@ -459,7 +459,12 @@ class H2ClientProtocol(Protocol, TimeoutMixin):
         except KeyError:
             pass  # We ignore server-initiated events
         else:
-            stream.close(StreamCloseReason.RESET, from_protocol=True)
+            stream.close(
+                StreamCloseReason.RESET,
+                from_protocol=True,
+                reset_error_code=event.error_code,
+                remote_reset=event.remote_reset,
+            )
 
     def window_updated(self, event: WindowUpdated) -> None:
         if event.stream_id != 0:

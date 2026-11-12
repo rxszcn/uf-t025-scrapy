@@ -27,8 +27,10 @@ from scrapy.exceptions import (
     DownloadConnectionRefusedError,
     DownloadFailedError,
     DownloadTimeoutError,
+    InactiveStreamClosedError,
     NotConfigured,
     NotSupported,
+    RefusedStreamError,
     ScrapyDeprecationWarning,
     StopDownload,
     UnsupportedURLSchemeError,
@@ -650,3 +652,70 @@ class TestWrapTwistedExceptions:
     def test_other_exceptions_pass_through(self) -> None:
         with pytest.raises(ZeroDivisionError), wrap_twisted_exceptions():
             1 / 0
+
+    @pytest.mark.parametrize(
+        ("wrapped_reason", "scrapy_exception"),
+        [
+            ("RefusedStream", RefusedStreamError),
+            ("InactiveStreamClosed", InactiveStreamClosedError),
+        ],
+    )
+    def test_http2_response_failed_mapping(
+        self, wrapped_reason: str, scrapy_exception: type[Exception]
+    ) -> None:
+        from scrapy.core._http2 import stream as h2_stream  # noqa: PLC0415
+
+        reason: BaseException
+        if wrapped_reason == "RefusedStream":
+            reason = h2_stream.RefusedStream(1, "127.0.0.1")
+        else:
+            reason = h2_stream.InactiveStreamClosed(Request("https://example.com"))
+        original = ResponseFailed([reason])
+        with pytest.raises(scrapy_exception) as exc_info, wrap_twisted_exceptions():
+            raise original
+        assert exc_info.value.__cause__ is original
+        assert str(exc_info.value) == str(original)
+
+    def test_http2_generic_reset_stays_download_failed(self) -> None:
+        """A reset that is not REFUSED_STREAM keeps the generic failure type."""
+        from h2.exceptions import ProtocolError  # noqa: PLC0415
+
+        original = ResponseFailed([ProtocolError("sent RST_STREAM")])
+        with pytest.raises(DownloadFailedError) as exc_info, wrap_twisted_exceptions():
+            raise original
+        assert exc_info.value.__cause__ is original
+
+    def test_inactive_stream_with_fatal_reason_not_retried(self) -> None:
+        """An inactive stream closed alongside a fatal reason (e.g. an SSL
+        handshake failure) is not safe to retry and keeps the generic type."""
+        import ssl  # noqa: PLC0415
+
+        from scrapy.core._http2.stream import InactiveStreamClosed  # noqa: PLC0415
+
+        original = ResponseFailed(
+            [
+                InactiveStreamClosed(Request("https://example.com")),
+                ssl.SSLError("certificate verify failed"),
+            ]
+        )
+        with pytest.raises(DownloadFailedError) as exc_info, wrap_twisted_exceptions():
+            raise original
+        assert exc_info.value.__cause__ is original
+
+    def test_inactive_stream_with_clean_close_is_retried(self) -> None:
+        from twisted.internet.error import ConnectionDone  # noqa: PLC0415
+
+        from scrapy.core._http2.stream import InactiveStreamClosed  # noqa: PLC0415
+
+        original = ResponseFailed(
+            [
+                InactiveStreamClosed(Request("https://example.com")),
+                ConnectionDone(),
+            ]
+        )
+        with (
+            pytest.raises(InactiveStreamClosedError) as exc_info,
+            wrap_twisted_exceptions(),
+        ):
+            raise original
+        assert exc_info.value.__cause__ is original

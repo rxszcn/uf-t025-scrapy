@@ -14,6 +14,8 @@ from scrapy.exceptions import (
     DownloadConnectionRefusedError,
     DownloadTimeoutError,
     IgnoreRequest,
+    InactiveStreamClosedError,
+    RefusedStreamError,
     ScrapyDeprecationWarning,
 )
 from scrapy.http import Request, Response
@@ -159,6 +161,32 @@ class TestRetry:
         mw = build_from_crawler(RetryMiddleware, crawler)
         req = Request(f"http://www.scrapytest.org/{exc.__name__}")
         self._test_retry_exception(req, exc("foo"), mw)
+
+    @pytest.mark.parametrize(
+        "exception",
+        [
+            InactiveStreamClosedError("connection closed before the request was sent"),
+            RefusedStreamError("the server refused the stream"),
+        ],
+    )
+    def test_http2_exceptions_retried_by_default(self, exception: Exception) -> None:
+        # the HTTP/2 retry signals are part of the default RETRY_EXCEPTIONS
+        assert type(exception) in self.mw.exceptions_to_retry
+        req = Request("https://www.scrapytest.org/refused")
+        self._test_retry_exception(req, exception)
+
+    @pytest.mark.parametrize(
+        "exception",
+        [
+            InactiveStreamClosedError("connection closed before the request was sent"),
+            RefusedStreamError("the server refused the stream"),
+        ],
+    )
+    def test_http2_exceptions_not_retried_with_dont_retry(
+        self, exception: Exception
+    ) -> None:
+        req = Request("https://www.scrapytest.org/refused", meta={"dont_retry": True})
+        assert self.mw.process_exception(req, exception) is None
 
     def _test_retry_exception(
         self, req: Request, exception: Exception, mw: RetryMiddleware | None = None

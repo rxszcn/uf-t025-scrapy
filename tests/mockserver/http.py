@@ -34,6 +34,7 @@ from .http_resources import (
     H2NoSupport,
     H2Push,
     H2Raw,
+    H2RefusedStream,
     H2ResetStream,
     HostHeaderResource,
     LargeChunkedFileResource,
@@ -111,6 +112,7 @@ class Root(BaseResource):
         put_child(self, b"set-cookie", SetCookie())
         put_child(self, b"uri", UriResource())
         put_child(self, b"h2-reset-stream", H2ResetStream())
+        put_child(self, b"h2-refused-stream", H2RefusedStream())
         put_child(self, b"h2-data-and-reset", H2DataAndReset())
         put_child(self, b"h2-goaway", H2GoAway())
         put_child(self, b"h2-raw", H2Raw())

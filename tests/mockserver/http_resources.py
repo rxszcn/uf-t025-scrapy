@@ -566,6 +566,18 @@ class H2ResetStream(LeafResource):
         return NOT_DONE_YET
 
 
+class H2RefusedStream(LeafResource):
+    """Reset the HTTP/2 stream of the request with the REFUSED_STREAM error
+    code (RFC 9113) instead of answering it, asking the client to retry."""
+
+    def render_GET(self, request: Request) -> int:
+        stream_id = cast("H2Stream", request.channel).streamID
+        # RST_STREAM (frame type 0x3) carrying the REFUSED_STREAM code (7)
+        rst_frame = _h2_frame(0x3, (7).to_bytes(4, "big"), stream_id=stream_id)
+        _h2_write(request, rst_frame)
+        return NOT_DONE_YET
+
+
 class H2GoAway(LeafResource):
     """End the HTTP/2 connection of the request with a GOAWAY frame instead of
     answering it"""

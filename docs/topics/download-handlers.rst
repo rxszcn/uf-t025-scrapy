@@ -152,6 +152,10 @@ these exceptions.
 
 .. autoexception:: scrapy.exceptions.DownloadTimeoutError
 
+.. autoexception:: scrapy.exceptions.InactiveStreamClosedError
+
+.. autoexception:: scrapy.exceptions.RefusedStreamError
+
 .. autoexception:: scrapy.exceptions.ResponseDataLossError
 
 .. autoexception:: scrapy.exceptions.UnsupportedURLSchemeError

@@ -1233,6 +1233,8 @@ Default:
         "scrapy.exceptions.DownloadConnectionRefusedError",
         "scrapy.exceptions.DownloadFailedError",
         "scrapy.exceptions.DownloadTimeoutError",
+        "scrapy.exceptions.InactiveStreamClosedError",
+        "scrapy.exceptions.RefusedStreamError",
         "scrapy.exceptions.ResponseDataLossError",
         "json.JSONDecodeError",
         "twisted.internet.error.ConnectionDone",

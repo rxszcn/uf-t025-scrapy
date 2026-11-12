@@ -51,6 +51,19 @@ class InactiveStreamClosed(ConnectionClosed):
         self.request = request
 
 
+class RefusedStream(ProtocolError):
+    """The remote peer reset the stream with the REFUSED_STREAM error code.
+
+    RFC 9113 requires the request to be retried, as the stream was not
+    processed. The request is therefore safe to send again over another
+    stream or connection.
+    """
+
+    def __init__(self, stream_id: int, ip_address: Any) -> None:
+        super().__init__(f"Remote peer {ip_address} refused stream {stream_id}")
+        self.stream_id = stream_id
+
+
 class InvalidHostname(H2Error):
     def __init__(
         self, request: Request, expected_hostname: str, expected_netloc: str
@@ -426,6 +439,8 @@ class Stream:
         reason: StreamCloseReason,
         errors: Sequence[BaseException] | None = None,
         from_protocol: bool = False,
+        reset_error_code: int | None = None,
+        remote_reset: bool = True,
     ) -> None:
         """Based on the reason sent we will handle each case."""
         # Have default value of errors as an empty list as
@@ -484,15 +499,17 @@ class Stream:
             self._fire_response_deferred()
 
         elif reason is StreamCloseReason.RESET:
-            self._deferred_response.errback(
-                ResponseFailed(
-                    [
-                        ProtocolError(
-                            f"Remote peer {self._protocol.metadata['ip_address']} sent RST_STREAM"
-                        )
-                    ]
+            if remote_reset and reset_error_code == ErrorCodes.REFUSED_STREAM:
+                # RFC 9113: REFUSED_STREAM means the stream was not processed,
+                # so the request is safe to retry on another stream.
+                reset_error: BaseException = RefusedStream(
+                    self.stream_id, self._protocol.metadata["ip_address"]
                 )
-            )
+            else:
+                reset_error = ProtocolError(
+                    f"Remote peer {self._protocol.metadata['ip_address']} sent RST_STREAM"
+                )
+            self._deferred_response.errback(ResponseFailed([reset_error]))
 
         elif reason is StreamCloseReason.CONNECTION_LOST:
             self._handle_connection_lost(errors)
